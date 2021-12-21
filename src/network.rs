@@ -1,5 +1,3 @@
-use std::error::Error;
-
 use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
 
@@ -22,7 +20,7 @@ impl Peer {
 }
 
 pub(crate) enum NetPlan<T> {
-    Listener(usize, mpsc::Sender<T>),
+    Listener(usize, mpsc::UnboundedSender<T>),
     BroadCaster(Vec<String>),
     Sender(String),
 }
@@ -41,7 +39,7 @@ impl<'a, T> NetPlan<T> where T: serde::Deserialize<'a> {
                             let ref mut buf = Vec::new();
                             stream.read_to_end(buf);
 
-                            buf
+                            buf.to_vec()
                         })
                         .and_then(|buf|
                             match bincode::deserialize::<T>(buf.as_slice()) {
@@ -53,14 +51,23 @@ impl<'a, T> NetPlan<T> where T: serde::Deserialize<'a> {
                                     )
                                 )
                             })
-                        .and_then(|result| msg_sender_chan.send(result))
+                        .and_then(|result|
+                            msg_sender_chan.send(result)
+                                .map_err(|err|
+                                    tokio::io::Error::new(
+                                        tokio::io::ErrorKind::Other,
+                                        format!("{}", err),
+                                    )
+                                )
+                        )
+                        .unwrap_or(())
                 }
             }
             NetPlan::Sender(_) => {
-                panic!("Listen is Unsupported for Sender net plan")
+                Err(tokio::io::Error::new(tokio::io::ErrorKind::ConnectionRefused, "Listen is Unsupported for Sender net plan"))
             }
             NetPlan::BroadCaster(_) => {
-                panic!("Listen is Unsupported for Sender net plan")
+                Err(tokio::io::Error::new(tokio::io::ErrorKind::ConnectionRefused, "Listen is Unsupported for Sender net plan"))
             }
         }
     }
