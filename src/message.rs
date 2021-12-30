@@ -4,9 +4,32 @@ use crate::{storage, type_def};
 use crate::type_def::TermId;
 
 #[derive(Clone, Serialize, Deserialize)]
+pub enum ProgressStatus {
+    Probe,
+    Follower,
+    Snapshot,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Progress {
+    progress_status: ProgressStatus,
+}
+
+impl Progress {
+    pub fn status(&self) -> ProgressStatus {
+        self.progress_status.clone()
+    }
+
+    pub fn update_status(&mut self, status: ProgressStatus) {
+        self.progress_status = status;
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub enum MessageType {
     Vote {},
     Heartbeat,
+    HeartbeatResp(ProgressStatus),
     AppEntries {
         log_term: type_def::TermId,
         log_index: type_def::LogIndex,

@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::io::Error;
 
 use tokio::io::AsyncReadExt;
@@ -19,7 +18,7 @@ impl Peer {
         self.id.clone()
     }
 
-    pub(crate) fn send_to(&self, msg: Message) -> tokio::io::Result<()> {
+    pub(crate) fn send_to(&self, msg: Message, _id: u32) -> tokio::io::Result<()> {
         todo!()
     }
 

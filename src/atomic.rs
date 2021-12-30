@@ -1,4 +1,4 @@
-use std::ops::Deref;
+use std::borrow::Borrow;
 use std::sync::atomic;
 
 pub struct Atomic<T> {
@@ -6,18 +6,17 @@ pub struct Atomic<T> {
 }
 
 impl<T> Atomic<T> {
-    pub fn set(&self, val: T) {
-        let ref _val = Box::new(val);
-        self._inner.store(**_val, atomic::Ordering::SeqCst);
+    pub fn set(&self, mut val: T) {
+        self._inner.store(&mut val, atomic::Ordering::SeqCst);
     }
 
     pub fn get(&self) -> Option<T> {
-        Option::Some(self._inner.load(atomic::Ordering::Relaxed))
+        Option::Some(unsafe { self._inner.load(atomic::Ordering::Relaxed).read() })
     }
 
-    pub fn new(val: T) -> Atomic<T> {
+    pub fn new(mut val: T) -> Atomic<T> {
         Atomic {
-            _inner: atomic::AtomicPtr::<T>::new(val)
+            _inner: atomic::AtomicPtr::<T>::new(&mut val)
         }
     }
 }
@@ -38,6 +37,10 @@ impl AtomicU64 {
         self._inner.fetch_add(1, atomic::Ordering::SeqCst);
 
         origin
+    }
+
+    pub fn increment_and_get(&self) -> u64 {
+        self._inner.fetch_add(1, atomic::Ordering::SeqCst)
     }
 
     pub fn get(&self) -> u64 {

@@ -9,7 +9,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{Interval, timeout};
 
 use crate::{atomic, message, type_def};
-use crate::message::{Message, MessageType};
+use crate::message::Progress;
 use crate::network;
 use crate::rafterror;
 use crate::rafterror::RaftError;
@@ -18,8 +18,8 @@ use crate::type_def::{LogIndex, TermId};
 
 pub struct Raft {
     storage: sync::Arc<dyn storage::Storage>,
-    _msg_recv: mpsc::UnboundedReceiver<Message>,
-    _state: std::sync::atomic::AtomicPtr<StateType>,
+    _msg_recv: mpsc::UnboundedReceiver<message::Message>,
+    _state: atomic::Atomic<StateType>,
     _peers: Vec<network::Peer>,
     _id: u32,
     _raft_port: usize,
@@ -28,9 +28,10 @@ pub struct Raft {
     _election_elapse: atomic::AtomicU64,
     _heartbeat_interval: u64,
     _log_entries: Vec<storage::Entry>,
-    _inner_sender: mpsc::Sender<Message>,
-    _inner_recv: mpsc::Receiver<Message>,
-    _leader: atomic::AtomicU64
+    _inner_sender: mpsc::Sender<message::Message>,
+    _inner_recv: mpsc::Receiver<message::Message>,
+    _leader: sync::atomic::AtomicU32,
+    _progress: BTreeMap<u32, message::Progress>,
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -40,7 +41,7 @@ pub enum StateType {
     Candidate,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, serde::Deserialize)]
 pub struct Config {
     port: usize,
     channel_buf_size: usize,
@@ -73,16 +74,16 @@ impl Config {
 pub fn new_raft(_id: u32,
                 conifg: Config,
                 storage: sync::Arc<dyn storage::Storage>,
-                recv: mpsc::UnboundedReceiver<Message>,
+                recv: mpsc::UnboundedReceiver<message::Message>,
                 peers: Vec<network::Peer>) -> Raft {
-    let (tx, rx) = mpsc::channel::<Message>(100);
+    let (tx, rx) = mpsc::channel::<message::Message>(100);
     let ref mut peer_vec = peers.to_vec();
     peer_vec.sort_by(|p1, p2| p1.id().cmp(&p2.id()));
 
     Raft {
         storage,
         _msg_recv: recv,
-        _state: sync::atomic::AtomicPtr::new(StateType::Follower.borrow_mut()),
+        _state: atomic::Atomic::new(StateType::Follower),
         _peers: peer_vec.clone(),
         _id,
         _raft_port: conifg.port(),
@@ -93,25 +94,32 @@ pub fn new_raft(_id: u32,
         _log_entries: vec![],
         _inner_sender: mpsc::Sender::from(tx),
         _inner_recv: mpsc::Receiver::from(rx),
-        _leader: atomic::AtomicU64::new(0)
+        _leader: sync::atomic::AtomicU32::new(0),
+        _progress: Default::default(),
     }
 }
 
 impl Raft {
-    async fn tick(interv: &mut Interval, _election_elapse: &AtomicU64) {
+    fn is_leader(&self) -> bool {
+        self._state.get().unwrap() == StateType::Leader
+    }
+
+    async fn tick(interv: &mut Interval,
+                  _election_elapse: &atomic::AtomicU64) -> u64 {
         interv.tick().await;
-        _election_elapse.fetch_add(1, Ordering::Relaxed);
+
+        _election_elapse.get_and_increment()
     }
 
     fn become_candidate(&mut self) {
-        self._state.store(&mut StateType::Candidate, Ordering::SeqCst);
+        self._state.set(StateType::Candidate);
         self.refresh_election_elapse();
         self._inner_sender.send(self.vote_for_self());
     }
 
-    fn vote_for_self(&self) -> Message {
-        Message::new(
-            MessageType::Champion {
+    fn vote_for_self(&self) -> message::Message {
+        message::Message::new(
+            message::MessageType::Champion {
                 last_log_index: self.last_log_index(),
                 last_log_term: self.last_log_term(),
             },
@@ -119,21 +127,21 @@ impl Raft {
             self._peers.iter()
                 .map(|peer| peer.id())
                 .collect(),
-            self._current_term.clone(),
+            self._current_term.get().unwrap(),
         )
     }
 
-    fn step(&self, _inner: Message) -> Result<(), rafterror::RaftError> {
-        match _inner.message_type() {
-            MessageType::Champion {
-                last_log_index, last_log_term
-            } => {
-                match self.get_peer(&self._id) {
-                    Some(peer) => peer.broadcast(_inner),
-                    None => Err(rafterror::RaftError::MissPeer(self._id.clone()))
-                }
-            }
-            _ => Ok(())
+    fn send_internal_to_peers(&self, _inner: message::Message) -> Result<(), rafterror::RaftError> {
+        match self.get_peer(&self.node_id()) {
+            Some(peer) =>
+                match _inner.message_type() {
+                    message::MessageType::Champion {
+                        last_log_index, last_log_term
+                    } => peer.broadcast(_inner),
+                    message::MessageType::Heartbeat => peer.broadcast(_inner),
+                    _ => Ok(())
+                },
+            None => Err(rafterror::RaftError::MissPeer(self.node_id()))
         }
     }
 
@@ -142,13 +150,48 @@ impl Raft {
     }
 
     fn is_follower(&self) -> bool {
-        self._state.load(Ordering::Relaxed) == &mut StateType::Follower
+        self._state.get().unwrap() == StateType::Follower
     }
 
+
+    fn get_peer(&self, id: &u32) -> Option<&network::Peer> {
+        for peer in &self._peers {
+            if peer.id().eq(id) {
+                return Option::Some(peer);
+            }
+        }
+
+        Option::None
+    }
+    fn refresh_election_elapse(&self) {
+        self._election_elapse.set(0)
+    }
+
+    fn become_follower(&self, term: type_def::TermId, from: u32) {
+        if !self.is_follower() {
+            self.refresh_election_elapse();
+            self._state.set(StateType::Follower);
+            self._current_term.set(term);
+            self._leader.store(from, sync::atomic::Ordering::SeqCst)
+        }
+    }
+    fn last_log_index(&self) -> LogIndex {
+        todo!()
+    }
+
+    fn last_log_term(&self) -> TermId {
+        todo!()
+    }
+    fn node_id(&self) -> u32 {
+        self._id.clone()
+    }
+}
+
+impl Raft {
     pub async fn start(&mut self) {
         let ref mut interv = tokio::time::interval(
             Duration::from_millis(
-                self._election_timeout.clone() / self._heartbeat_interval.clone()
+                self._heartbeat_interval.clone()
             )
         );
 
@@ -164,66 +207,81 @@ impl Raft {
                         }
                     }
                 }
-                _ = Self::tick(interv, &self._election_elapse) => {}
+
+                _ = Self::tick(interv, &self._election_elapse), if self.is_leader() => {
+                   self._inner_sender.send(
+                        message::Message::new(
+                            message::MessageType::Heartbeat,
+                            self.node_id(),
+                            self._peers
+                                .iter()
+                                .map(|peer| peer.id())
+                                .collect(),
+                            self._current_term.get().unwrap(),
+                        )).await.unwrap_or(())
+                }
 
                 Some(inner_msg) = self._inner_recv.recv() => {
-                    self.step(inner_msg).unwrap_or(())
+                    self.send_internal_to_peers(inner_msg).unwrap_or(())
                 }
             }
         }
     }
 
-    pub(crate) fn handle_msg(&mut self, msg: Message) -> Result<(), RaftError> {
+    pub(crate) fn handle_msg(&mut self, msg: message::Message) -> Result<(), RaftError> {
         match msg.message_type() {
             message::MessageType::Heartbeat => {
                 self.become_follower(msg.term(), msg.from());
-                Ok(())
-            },
+
+                let arr: [u32; 1] = [msg.from(); 1];
+                let mut to = Vec::from(arr);
+
+                self._inner_sender.try_send(
+                    message::Message::new(
+                        message::MessageType::HeartbeatResp(
+                            self._progress.get(&self.node_id())
+                                .unwrap()
+                                .status()
+                                .clone()
+                        ),
+                        self.node_id(),
+                        to.clone(),
+                        msg.term(),
+                    ))
+                    .map_err(|err| RaftError::from(err))
+            }
             message::MessageType::Vote {} => Ok(()),
             message::MessageType::AppEntries {
                 log_term,
                 log_index,
-                entries
+                ref mut entries
             } => {
-                if !self.is_follower() {
-                    self.become_follower(msg.term(), msg.from())
-                }
-
-                self.storage.append(entries);
+                self.become_follower(msg.term(), msg.from());
+                self._log_entries.append(entries);
 
                 Ok(())
             }
             message::MessageType::Champion {
                 last_log_index,
                 last_log_term
-            } => Ok(())
-        }
-    }
+            } => Ok(()),
+            message::MessageType::HeartbeatResp(progress_status) => {
+                self.refresh_election_elapse();
+                match self._progress.get(&msg.from()) {
+                    Some(mut progress) => {
+                        let ref mut copied = progress.clone();
 
-    fn get_peer(&self, id: &u32) -> Option<&network::Peer> {
-        for peer in &self._peers {
-            if peer.id().eq(id) {
-                return Option::Some(peer);
+                        copied.update_status(progress_status);
+
+                        self._progress.insert(
+                            msg.from(),
+                            copied.clone(),
+                        );
+                    }
+                    None => {}
+                }
+                Ok(())
             }
         }
-
-        Option::None
-    }
-    fn refresh_election_elapse(&self) {
-        self._election_elapse.store(0, Ordering::SeqCst)
-    }
-
-    fn become_follower(&self, term: type_def::TermId, from: u32) {
-        self.refresh_election_elapse();
-        self._state.store(&mut StateType::Follower, Ordering::SeqCst);
-        self._current_term.set(term);
-        self._leader.set(from)
-    }
-    fn last_log_index(&self) -> LogIndex {
-        todo!()
-    }
-
-    fn last_log_term(&self) -> TermId {
-        todo!()
     }
 }
