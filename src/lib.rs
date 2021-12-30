@@ -9,21 +9,25 @@ pub mod raftnode;
 pub mod storage;
 mod message;
 pub mod network;
+mod type_def;
+mod rafterror;
+mod atomic;
 
-pub async fn main(storage: Arc<dyn Storage>) -> Result<(), tokio::task::JoinError> {
+pub async fn main(storage: Arc<dyn Storage>, node_id: &u32) {
     let (tx, rx) = mpsc::unbounded_channel();
 
-    let mut raft = raftnode::new_raft(Config::new(8080, 100), storage, rx, Vec::new());
-    let start_listener = tokio::spawn(
-        network::NetPlan::Listener(8090, tx)
-            .listen()
+    tokio::spawn(
+        network::NetPlan::Listener(8090)
+            .listen_and_send(tx)
     );
-    raft.start();
 
-    match start_listener.await {
-        Ok(result) => Ok(result.unwrap()),
-        Err(err) => Err(err)
-    }
+    raftnode::new_raft(
+        node_id.clone(),
+        Config::new(8080, 100, 3),
+        storage,
+        rx,
+        Vec::new(),
+    ).start().await
 }
 
 #[cfg(test)]
