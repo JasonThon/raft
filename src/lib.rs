@@ -12,8 +12,10 @@ pub mod network;
 mod type_def;
 mod rafterror;
 mod atomic;
+mod progress;
+mod utils;
 
-pub async fn main(storage: Arc<dyn Storage>, node_id: &u32) {
+pub async fn main(storage: Arc<dyn Storage>, node_id: &u64) {
     let (tx, rx) = mpsc::unbounded_channel();
 
     tokio::spawn(
@@ -28,12 +30,4 @@ pub async fn main(storage: Arc<dyn Storage>, node_id: &u32) {
         rx,
         Vec::new(),
     ).start().await
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn it_works() {
-        assert_eq!(2 + 2, 4);
-    }
 }

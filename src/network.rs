@@ -8,22 +8,30 @@ use crate::rafterror::RaftError;
 
 #[derive(Clone)]
 pub struct Peer {
-    id: u32,
+    id: u64,
     url: String,
     peers_url: Vec<String>,
 }
 
 impl Peer {
-    pub(crate) fn id(&self) -> u32 {
+    pub(crate) fn id(&self) -> u64 {
         self.id.clone()
     }
 
-    pub(crate) fn send_to(&self, msg: Message, _id: u32) -> tokio::io::Result<()> {
+    pub(crate) fn send_to(&self, msg: Message, _id: u64) -> tokio::io::Result<()> {
         todo!()
     }
 
     pub(crate) fn broadcast(&self, msg: Message) -> Result<(), RaftError> {
         todo!()
+    }
+
+    pub(crate) fn new(id: u64, url:&str, peers_url: Vec<String>) -> Peer {
+        Peer {
+            id,
+            url: String::from(url),
+            peers_url
+        }
     }
 }
 

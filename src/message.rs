@@ -1,56 +1,41 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{storage, type_def};
-use crate::type_def::TermId;
+use crate::{progress, storage, type_def};
+use crate::type_def::{LogIndex, TermId};
 
-#[derive(Clone, Serialize, Deserialize)]
-pub enum ProgressStatus {
-    Probe,
-    Follower,
-    Snapshot,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-pub struct Progress {
-    progress_status: ProgressStatus,
-}
-
-impl Progress {
-    pub fn status(&self) -> ProgressStatus {
-        self.progress_status.clone()
-    }
-
-    pub fn update_status(&mut self, status: ProgressStatus) {
-        self.progress_status = status;
-    }
-}
 
 #[derive(Clone, Serialize, Deserialize)]
 pub enum MessageType {
-    Vote {},
+    VoteRsp {
+        granted: bool
+    },
     Heartbeat,
-    HeartbeatResp(ProgressStatus),
+    HeartbeatResp {
+        status: progress::ProgressStatus,
+        reject: bool
+    },
     AppEntries {
-        log_term: type_def::TermId,
-        log_index: type_def::LogIndex,
         entries: Vec<storage::Entry>,
     },
-    Champion {
-        last_log_index: type_def::LogIndex,
-        last_log_term: type_def::TermId,
+    AppEntriesResp {
+        rejected: bool
+    },
+    Vote {
+        last_log_index: LogIndex,
+        last_log_term: TermId,
     },
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct Message {
     msg_type: MessageType,
-    from: u32,
-    to: Vec<u32>,
+    from: u64,
+    to: Vec<u64>,
     term: type_def::TermId,
 }
 
 impl Message {
-    pub fn new(_type: MessageType, from: u32, to: Vec<u32>, term: type_def::TermId) -> Message {
+    pub fn new(_type: MessageType, from: u64, to: Vec<u64>, term: type_def::TermId) -> Message {
         Message {
             msg_type: _type.clone(),
             from,
@@ -68,7 +53,7 @@ impl Message {
         self.term.clone()
     }
 
-    pub(crate) fn from(&self) -> u32 {
+    pub(crate) fn from(&self) -> u64 {
         self.from.clone()
     }
 }
